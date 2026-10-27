@@ -1,4 +1,4 @@
 # Build-integrity fixture. Not a real library.
 module Fixture
-  MARKER = "release"
+  MARKER = "writer-220f31"
 end
