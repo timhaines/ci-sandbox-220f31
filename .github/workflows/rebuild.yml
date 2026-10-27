@@ -1,0 +1,87 @@
+name: Rebuild a tagged release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild and push, for example v0.1.0
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+    - name: Check the request
+      env:
+        TAG: ${{ inputs.tag }}
+      run: |
+        if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+          echo "Only master may run this workflow, not $GITHUB_REF" >&2
+          exit 1
+        fi
+        if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "The tag has to look like vX.Y.Z" >&2
+          exit 1
+        fi
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: refs/tags/${{ inputs.tag }}
+        persist-credentials: false
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+      with:
+        ruby-version: 3.1
+    - name: Compare VERSION with the tag
+      env:
+        TAG: ${{ inputs.tag }}
+      run: |
+        version="$(tr -d '[:space:]' < VERSION)"
+        if [[ "v$version" != "$TAG" ]]; then
+          echo "VERSION is $version but the tag is $TAG" >&2
+          exit 1
+        fi
+        echo "GEM_FILE=fixture-$version.gem" >> "$GITHUB_ENV"
+    - name: Package
+      run: gem build fixture.gemspec --output "$GEM_FILE"
+    - name: Keep the package for the next job
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: packaged
+        path: fixture-*.gem
+        if-no-files-found: error
+        retention-days: 1
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: rebuild
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+    - name: Fetch the package
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: packaged
+        path: gems
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+      with:
+        ruby-version: 3.1
+    - name: "Fixture only: print the run's ref and identity-token claims"
+      run: |
+        echo "event=$GITHUB_EVENT_NAME ref=$GITHUB_REF actor=$GITHUB_ACTOR"
+        curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=rubygems.org" \
+          | python3 -c 'import sys,json,base64; t=json.load(sys.stdin)["value"].split(".")[1]; c=json.loads(base64.urlsafe_b64decode(t+"="*(-len(t)%4))); [print("claim %s=%s" % (k, c.get(k))) for k in ("repository","ref","environment","job_workflow_ref","actor")]'
+    - name: Get push credentials
+      uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a # v2.1.0
+    - name: Push the gem
+      run: gem push gems/*.gem
